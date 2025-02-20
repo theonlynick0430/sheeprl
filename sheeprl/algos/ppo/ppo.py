@@ -171,6 +171,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     )
     clip_rewards_fn = lambda r: np.tanh(r) if cfg.env.clip_rewards else r
     # Create the actor and critic models
+    # agent is the actor-critic model that is udpated with the PPO algorithm (pi_theta and v_theta)
+    # player is the actor model that is used to sample actions (pi_theta_old)
     agent, player = build_agent(
         fabric,
         actions_dim,
@@ -264,6 +266,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         step_data[k] = next_obs[k][np.newaxis]
 
     for iter_num in range(start_iter, total_iters + 1):
+        # collect interactions with env
         with torch.inference_mode():
             for _ in range(0, cfg.algo.rollout_steps):
                 policy_step += cfg.env.num_envs * world_size
@@ -275,10 +278,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     torch_obs = prepare_obs(
                         fabric, next_obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs
                     )
+                    # actions shape: [N_envs, action_dim]
+                    # logprobs shape: [N_envs, 1]
+                    # values shape: [N_envs, 1]
                     actions, logprobs, values = player(torch_obs)
                     if is_continuous:
                         real_actions = torch.stack(actions, -1).cpu().numpy()
                     else:
+                        # if discrete actions, find highest probability action
                         real_actions = torch.stack([act.argmax(dim=-1) for act in actions], dim=-1).cpu().numpy()
                     actions = torch.cat(actions, -1).cpu().numpy()
 
@@ -370,6 +377,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             gathered_data = {k: v.flatten(start_dim=0, end_dim=1).float() for k, v in local_data.items()}
 
         with timer("Time/train_time", SumMetric, sync_on_compute=cfg.metric.sync_on_compute):
+            # Train agent with updated buffer
             train(fabric, agent, optimizer, gathered_data, aggregator, cfg)
         train_step += world_size
 

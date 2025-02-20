@@ -360,6 +360,7 @@ def build_agent(
     player.actor = fabric_player.setup_module(player.actor)
 
     # Tie weights between the agent and the player
+    # these weights are shared permanently during training 
     for agent_p, player_p in zip(agent.feature_extractor.parameters(), player.feature_extractor.parameters()):
         player_p.data = agent_p.data
     for agent_p, player_p in zip(agent.actor.parameters(), player.actor.parameters()):
