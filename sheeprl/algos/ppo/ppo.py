@@ -314,7 +314,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                                     torch_v = torch_v / 255.0 - 0.5
                                 real_next_obs[k][i] = torch_v
                         vals = player.get_values(real_next_obs).cpu().numpy()
-                        # if the episode is truncated we need to estimate the reward for the remainder of the trajectory
+                        # if the episode is truncated we need to estimate the last reward using value function
                         rewards[truncated_envs] += cfg.algo.gamma * vals.reshape(rewards[truncated_envs].shape)
                     dones = np.logical_or(terminated, truncated).reshape(cfg.env.num_envs, -1).astype(np.uint8)
                     rewards = clip_rewards_fn(rewards).reshape(cfg.env.num_envs, -1).astype(np.float32)
