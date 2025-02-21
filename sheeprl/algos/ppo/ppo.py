@@ -290,6 +290,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     actions = torch.cat(actions, -1).cpu().numpy()
 
                     # Single environment step
+                    # env runs on the CPU
+                    # rewards shape: [N_envs,]
+                    # terminated shape: [N_envs,]
+                    # truncated shape: [N_envs,]
                     obs, rewards, terminated, truncated, info = envs.step(real_actions.reshape(envs.action_space.shape))
                     truncated_envs = np.nonzero(truncated)[0]
                     if len(truncated_envs) > 0:
@@ -310,6 +314,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                                     torch_v = torch_v / 255.0 - 0.5
                                 real_next_obs[k][i] = torch_v
                         vals = player.get_values(real_next_obs).cpu().numpy()
+                        # if the episode is truncated we need to estimate the reward for the remainder of the trajectory
                         rewards[truncated_envs] += cfg.algo.gamma * vals.reshape(rewards[truncated_envs].shape)
                     dones = np.logical_or(terminated, truncated).reshape(cfg.env.num_envs, -1).astype(np.uint8)
                     rewards = clip_rewards_fn(rewards).reshape(cfg.env.num_envs, -1).astype(np.float32)
@@ -325,6 +330,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     step_data["advantages"] = np.zeros_like(rewards, shape=(1, *rewards.shape))
 
                 # Append data to buffer
+                # once the buffer is full, the oldest data will be replaced, which is typical
+                # for online learning
                 rb.add(step_data, validate_args=cfg.buffer.validate_args)
 
                 # Update the observation and dones
@@ -348,6 +355,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             fabric.print(f"Rank-0: policy_step={policy_step}, reward_env_{i}={ep_rew[-1]}")
 
         # Transform the data into PyTorch Tensors
+        # local_data shape: [key: [t, ...]]
         local_data = rb.to_tensor(dtype=None, device=device, from_numpy=cfg.buffer.from_numpy)
 
         # Estimate returns with GAE (https://arxiv.org/abs/1506.02438)

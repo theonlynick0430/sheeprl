@@ -91,10 +91,12 @@ def gae(
     nextnonterminal = not_dones[-1]
     advantages = torch.zeros_like(rewards)
     for t in reversed(range(num_steps)):
+        # replay buffer is always ordered by time
         if t < num_steps - 1:
             nextnonterminal = not_dones[t]
             nextvalues = values[t + 1]
         delta = rewards[t] + nextvalues * nextnonterminal * gamma - values[t]
+        # recursive unraveling of A_t = sum_l (gamma*lambda)^l * delta_{t+l} [Eqn. 16]
         advantages[t] = lastgaelam = delta + nextnonterminal * lastgaelam * gamma * gae_lambda
     returns = advantages + values
     return returns, advantages
