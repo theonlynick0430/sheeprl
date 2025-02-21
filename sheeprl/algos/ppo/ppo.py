@@ -25,6 +25,8 @@ from sheeprl.utils.metric import MetricAggregator
 from sheeprl.utils.registry import register_algorithm
 from sheeprl.utils.timer import timer
 from sheeprl.utils.utils import gae, normalize_tensor, polynomial_decay, save_configs
+import sheeprl.algos.rnd.rnd as rnd
+from sheeprl.algos.rnd.rnd import INTR, EXTR
 
 
 def train(
@@ -76,12 +78,22 @@ def train(
             # Value loss
             v_loss = value_loss(
                 new_values,
-                batch["values"],
-                batch["returns"],
+                batch[f"values_{EXTR}"],
+                batch[f"returns_{EXTR}"],
                 cfg.algo.clip_coef,
                 cfg.algo.clip_vloss,
                 cfg.algo.loss_reduction,
             )
+            if cfg.algo.rnd.enabled:
+                # intrinsic value loss
+                v_loss += value_loss(
+                    new_values,
+                    batch[f"values_{INTR}"],
+                    batch[f"returns_{INTR}"],
+                    cfg.algo.clip_coef,
+                    cfg.algo.clip_vloss,
+                    cfg.algo.loss_reduction,
+                )
 
             # Entropy loss
             ent_loss = entropy_loss(entropy, cfg.algo.loss_reduction)
@@ -182,6 +194,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         state["agent"] if cfg.checkpoint.resume_from else None,
     )
 
+    if cfg.algo.rnd.enabled:
+        # Create RND target, predictor network heads
+        target_rnd, predictor_rnd = rnd.build_networks(
+            fabric, 
+            cfg=cfg,
+            obs_space=observation_space,
+        )
+
     # Define the optimizer
     optimizer = hydra.utils.instantiate(cfg.algo.optimizer, params=agent.parameters(), _convert_="all")
 
@@ -259,11 +279,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     # Get the first environment observation and start the optimization
     step_data = {}
-    next_obs = envs.reset(seed=cfg.seed)[0]  # [N_envs, N_obs]
+    obs = envs.reset(seed=cfg.seed)[0]
     for k in obs_keys:
         if k in cfg.algo.cnn_keys.encoder:
-            next_obs[k] = next_obs[k].reshape(cfg.env.num_envs, -1, *next_obs[k].shape[-2:])
-        step_data[k] = next_obs[k][np.newaxis]
+            obs[k] = obs[k].reshape(cfg.env.num_envs, -1, *obs[k].shape[-2:])
+        step_data[k] = obs[k][np.newaxis]
+    torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
 
     for iter_num in range(start_iter, total_iters + 1):
         # collect interactions with env
@@ -275,12 +296,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 # to get the action given the observation and the time taken into the environment
                 with timer("Time/env_interaction_time", SumMetric, sync_on_compute=False):
                     # Sample an action given the observation received by the environment
-                    torch_obs = prepare_obs(
-                        fabric, next_obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs
-                    )
                     # actions shape: [N_envs, action_dim]
                     # logprobs shape: [N_envs, 1]
-                    # values shape: [N_envs, 1]
+                    # values shape: {key: [N_envs, 1]}
                     actions, logprobs, values = player(torch_obs)
                     if is_continuous:
                         real_actions = torch.stack(actions, -1).cpu().numpy()
@@ -291,10 +309,28 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
                     # Single environment step
                     # env runs on the CPU
-                    # rewards shape: [N_envs,]
                     # terminated shape: [N_envs,]
                     # truncated shape: [N_envs,]
                     obs, rewards, terminated, truncated, info = envs.step(real_actions.reshape(envs.action_space.shape))
+                    # rewards shape: {key: [N_envs,]}
+                    rewards = {EXTR: rewards}
+
+                    # Update the observation
+                    for k in obs_keys:
+                        if k in cfg.algo.cnn_keys.encoder:
+                            obs[k] = obs[k].reshape(cfg.env.num_envs, -1, *obs[k].shape[-2:])
+                        step_data[k] = obs[k][np.newaxis]
+                    torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
+                    
+                    if cfg.algo.rnd.enabled:
+                        # Calculate intrinsic reward
+                        # reward dependent on next state
+                        target = target_rnd(torch_obs)
+                        prediction = predictor_rnd(torch_obs)
+                        mse_loss = torch.sum((target - prediction)**2, dim=-1)/cfg.algo.rnd.k 
+                        rewards[INTR] = mse_loss.cpu().numpy()
+
+                    # Update reward for truncated episodes
                     truncated_envs = np.nonzero(truncated)[0]
                     if len(truncated_envs) > 0:
                         real_next_obs = {
@@ -313,35 +349,34 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                                     torch_v = torch_v.view(-1, *v.shape[-2:])
                                     torch_v = torch_v / 255.0 - 0.5
                                 real_next_obs[k][i] = torch_v
-                        vals = player.get_values(real_next_obs).cpu().numpy()
-                        # if the episode is truncated we need to estimate the reward for the remainder of the trajectory
-                        rewards[truncated_envs] += cfg.algo.gamma * vals.reshape(rewards[truncated_envs].shape)
+                        # if the episode is truncated we need to estimate the last reward using the value function
+                        vals = player.get_values(real_next_obs)
+                        vals = {k: v.cpu().numpy() for k, v in vals.items()}
+                        rewards[EXTR][truncated_envs] += cfg.algo.gamma * vals[EXTR].reshape(rewards[EXTR][truncated_envs].shape)
+                        if cfg.algo.rnd.enabled:
+                            rewards[INTR][truncated_envs] += cfg.algo.rnd.gamma * vals[INTR].reshape(rewards[INTR][truncated_envs].shape)
+                        
                     dones = np.logical_or(terminated, truncated).reshape(cfg.env.num_envs, -1).astype(np.uint8)
-                    rewards = clip_rewards_fn(rewards).reshape(cfg.env.num_envs, -1).astype(np.float32)
+                    rewards[EXTR] = clip_rewards_fn(rewards[EXTR]).reshape(cfg.env.num_envs, -1).astype(np.float32)
 
                 # Update the step data
                 step_data["dones"] = dones[np.newaxis]
-                step_data["values"] = values.cpu().numpy()[np.newaxis]
+                for k, v in values.items():
+                    step_data[f"values_{k}"] = v.cpu().numpy()[np.newaxis]
                 step_data["actions"] = actions[np.newaxis]
                 step_data["logprobs"] = logprobs.cpu().numpy()[np.newaxis]
-                step_data["rewards"] = rewards[np.newaxis]
+                for k, v in rewards.items():
+                    step_data[f"rewards_{k}"] = v[np.newaxis]
                 if cfg.buffer.memmap:
-                    step_data["returns"] = np.zeros_like(rewards, shape=(1, *rewards.shape))
-                    step_data["advantages"] = np.zeros_like(rewards, shape=(1, *rewards.shape))
+                    step_data["advantages"] = np.zeros_like(rewards[EXTR], shape=(1, *rewards[EXTR].shape))
+                    for k, v in rewards.items():
+                        step_data[f"returns_{k}"] = np.zeros_like(v, shape=(1, *v.shape))
+                        
 
                 # Append data to buffer
                 # once the buffer is full, the oldest data will be replaced, which is typical
                 # for online learning
                 rb.add(step_data, validate_args=cfg.buffer.validate_args)
-
-                # Update the observation and dones
-                next_obs = {}
-                for k in obs_keys:
-                    _obs = obs[k]
-                    if k in cfg.algo.cnn_keys.encoder:
-                        _obs = _obs.reshape(cfg.env.num_envs, -1, *_obs.shape[-2:])
-                    step_data[k] = _obs[np.newaxis]
-                    next_obs[k] = _obs
 
                 if cfg.metric.log_level > 0 and "final_info" in info:
                     for i, agent_ep_info in enumerate(info["final_info"]):
@@ -360,20 +395,31 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
         # Estimate returns with GAE (https://arxiv.org/abs/1506.02438)
         with torch.inference_mode():
-            torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
             next_values = player.get_values(torch_obs)
+            # Add returns and advantages to the buffer
             returns, advantages = gae(
-                local_data["rewards"],
-                local_data["values"],
+                local_data[f"rewards_{EXTR}"],
+                local_data[f"values_{EXTR}"],
                 local_data["dones"],
                 next_values,
                 cfg.algo.rollout_steps,
                 cfg.algo.gamma,
                 cfg.algo.gae_lambda,
             )
-            # Add returns and advantages to the buffer
-            local_data["returns"] = returns.float()
+            local_data[f"returns_{EXTR}"] = returns.float()
             local_data["advantages"] = advantages.float()
+            if cfg.algo.rnd.enabled:
+                returns, advantages = gae(
+                    local_data[f"rewards_{INTR}"],
+                    local_data[f"values_{INTR}"],
+                    local_data["dones"],
+                    next_values,
+                    cfg.algo.rollout_steps,
+                    cfg.algo.rnd.gamma,
+                    cfg.algo.rnd.gae_lambda,
+                )
+                local_data[f"returns_{INTR}"] = returns.float()
+                local_data["advantages"] += cfg.rnd.beta * advantages.float()
 
         if cfg.buffer.share_data and fabric.world_size > 1:
             # Gather all the tensors from all the world and reshape them

@@ -50,6 +50,17 @@ critic:
   layer_norm: ${algo.layer_norm}
   ortho_init: False
 
+# RND
+rnd: 
+  enabled: True
+  # weighting in overall advantage
+  beta: 1.0 # need to tune
+  # for intrinsic critic
+  gamma: 0.999 # from paper
+  gae_lambda: 0.95 # variance reduction
+  # for target, predictor network
+  k: 16 # output embedding dim
+
 # Single optimizer for both actor and critic
 optimizer:
   lr: 1e-3

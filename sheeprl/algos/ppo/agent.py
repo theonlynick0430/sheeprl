@@ -16,6 +16,7 @@ from torch.distributions import Distribution, Independent, Normal, OneHotCategor
 from sheeprl.models.models import MLP, MultiEncoder, NatureCNN
 from sheeprl.utils.fabric import get_single_device_fabric
 from sheeprl.utils.utils import safeatanh, safetanh
+from sheeprl.algos.rnd.rnd import INTR, EXTR
 
 
 class CNNEncoder(nn.Module):
@@ -97,6 +98,7 @@ class PPOAgent(nn.Module):
         encoder_cfg: Dict[str, Any],
         actor_cfg: Dict[str, Any],
         critic_cfg: Dict[str, Any],
+        rnd_cfg: Dict[str, Any],
         cnn_keys: Sequence[str],
         mlp_keys: Sequence[str],
         screen_size: int,
@@ -149,10 +151,8 @@ class PPOAgent(nn.Module):
                     torch.nn.init.orthogonal_(layer.weight, 1.0)
                     layer.bias.data.zero_()
         features_dim = self.feature_extractor.output_dim
-        ############ RND MOD ############
-        # Create separate critic for intrinsic and extrinsic rewards
         self.critic = nn.ModuleDict()
-        self.critic["extrinsic"] = MLP(
+        self.critic[EXTR] = MLP(
             input_dims=features_dim,
             output_dim=1,
             hidden_sizes=[critic_cfg.dense_units] * critic_cfg.mlp_layers,
@@ -164,9 +164,10 @@ class PPOAgent(nn.Module):
                 else None
             ),
         )
-        # use same critic architecture for intrinsic rewards
-        self.critic["intrinsic"] = copy.deepcopy(self.critic["extrinsic"])
-        ############ END MOD ############
+        if rnd_cfg.enabled:
+            # Create critic head for intrinsic rewards
+            # use same architecture as critic for extrinsic rewards
+            self.critic[INTR] = copy.deepcopy(self.critic[EXTR])
         actor_backbone = (
             MLP(
                 input_dims=features_dim,
@@ -217,9 +218,7 @@ class PPOAgent(nn.Module):
     ) -> Tuple[Sequence[Tensor], Tensor, Tensor, Tensor]:
         feat = self.feature_extractor(obs)
         actor_out: List[Tensor] = self.actor(feat)
-        ############ RND MOD ############
         values = {key: critic(feat) for key, critic in self.critic.items()}
-        ############ END MOD ############
         if self.is_continuous:
             if self.distribution == "normal":
                 actions, log_prob, entropy = self._normal(actor_out[0], actions)
@@ -279,9 +278,7 @@ class PPOPlayer(nn.Module):
 
     def forward(self, obs: Dict[str, Tensor]) -> Tuple[Sequence[Tensor], Tensor, Tensor]:
         feat = self.feature_extractor(obs)
-        ############ RND MOD ############
         values = {key: critic(feat) for key, critic in self.critic.items()}
-        ############ END MOD ############
         actor_out: List[Tensor] = self.actor(feat)
         if self.actor.is_continuous:
             if self.actor.distribution == "normal":
@@ -305,9 +302,7 @@ class PPOPlayer(nn.Module):
 
     def get_values(self, obs: Dict[str, Tensor]) -> Tensor:
         feat = self.feature_extractor(obs)
-        ############ RND MOD ############
         return {key: critic(feat) for key, critic in self.critic.items()}
-        ############ END MOD ############
 
     def get_actions(self, obs: Dict[str, Tensor], greedy: bool = False) -> Sequence[Tensor]:
         feat = self.feature_extractor(obs)
@@ -349,6 +344,7 @@ def build_agent(
         encoder_cfg=cfg.algo.encoder,
         actor_cfg=cfg.algo.actor,
         critic_cfg=cfg.algo.critic,
+        rnd_cfg=cfg.algo.rnd,
         cnn_keys=cfg.algo.cnn_keys.encoder,
         mlp_keys=cfg.algo.mlp_keys.encoder,
         screen_size=cfg.env.screen_size,
@@ -363,19 +359,15 @@ def build_agent(
 
     # Setup training agent
     agent.feature_extractor = fabric.setup_module(agent.feature_extractor)
-    ############ RND MOD ############
     for key, critic in agent.critic.items():
         agent.critic[key] = fabric.setup_module(critic)
-    ############ END MOD ############
     agent.actor = fabric.setup_module(agent.actor)
 
     # Setup player agent
     fabric_player = get_single_device_fabric(fabric)
     player.feature_extractor = fabric_player.setup_module(player.feature_extractor)
-    ############ RND MOD ############
     for key, critic in player.critic.items():
         player.critic[key] = fabric_player.setup_module(critic)
-    ############ END MOD ############
     player.actor = fabric_player.setup_module(player.actor)
 
     # Tie weights between the agent and the player
