@@ -72,6 +72,7 @@ def build_networks(
         # unfreeze the predictor network
         param.requires_grad = True
 
+    target = target.to(fabric.device)
     predictor = fabric.setup_module(predictor)
 
     return target, predictor

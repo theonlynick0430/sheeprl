@@ -249,7 +249,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     last_log = state["last_log"] if cfg.checkpoint.resume_from else 0
     last_checkpoint = state["last_checkpoint"] if cfg.checkpoint.resume_from else 0
     policy_steps_per_iter = int(cfg.env.num_envs * cfg.algo.rollout_steps * world_size)
-    total_iters = cfg.algo.total_steps // policy_steps_per_iter if not cfg.dry_run else 1
+    total_iters = int(cfg.algo.total_steps // policy_steps_per_iter if not cfg.dry_run else 1)
     if cfg.checkpoint.resume_from:
         cfg.algo.per_rank_batch_size = state["batch_size"] // fabric.world_size
 
