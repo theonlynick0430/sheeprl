@@ -53,12 +53,12 @@ critic:
 # RND
 rnd: 
   enabled: True
-  # weighting in overall advantage
+  # reward weighting
   beta: 1.0 # need to tune
   # for intrinsic critic
   gamma: 0.999 # from paper
   gae_lambda: 0.95 # variance reduction
-  # for target, predictor network
+  # for target, predictor networks
   k: 16 # output embedding dim
 
 # Single optimizer for both actor and critic

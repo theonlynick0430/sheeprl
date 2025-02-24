@@ -195,7 +195,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     )
 
     if cfg.algo.rnd.enabled:
-        # Create RND target, predictor network heads
+        # Create RND target, predictor networks
         target_rnd, predictor_rnd = rnd.build_networks(
             fabric, 
             cfg=cfg,
@@ -327,8 +327,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         # reward dependent on next state
                         target = target_rnd(torch_obs)
                         prediction = predictor_rnd(torch_obs)
-                        mse_loss = torch.sum((target - prediction)**2, dim=-1)/cfg.algo.rnd.k 
-                        rewards[INTR] = mse_loss.cpu().numpy()
+                        r_intr = torch.sum((target - prediction)**2, dim=-1)/cfg.algo.rnd.k 
+                        # r = r_extr + beta * r_intr
+                        r_intr = cfg.algo.rnd.beta * r_intr
+                        rewards[INTR] = r_intr.cpu().numpy()
 
                     # Update reward for truncated episodes
                     truncated_envs = np.nonzero(truncated)[0]
@@ -419,7 +421,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     cfg.algo.rnd.gae_lambda,
                 )
                 local_data[f"returns_{INTR}"] = returns.float()
-                local_data["advantages"] += cfg.rnd.beta * advantages.float()
+                local_data["advantages"] += advantages.float()
 
         if cfg.buffer.share_data and fabric.world_size > 1:
             # Gather all the tensors from all the world and reshape them

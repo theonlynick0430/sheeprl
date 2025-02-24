@@ -9,7 +9,7 @@ import hydra
 import gymnasium
 
 from sheeprl.models.models import MultiEncoder, MLP
-from sheeprl.algos.ppo.agent import CNNEncoder, MLPEncoder
+from sheeprl.algos.ppo.encoders import CNNEncoder, MLPEncoder
 
 
 INTR = "intrinsic"
