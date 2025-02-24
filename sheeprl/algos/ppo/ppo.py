@@ -77,7 +77,7 @@ def train(
 
             # Value loss
             v_loss = value_loss(
-                new_values,
+                new_values[EXTR],
                 batch[f"values_{EXTR}"],
                 batch[f"returns_{EXTR}"],
                 cfg.algo.clip_coef,
@@ -87,7 +87,7 @@ def train(
             if cfg.algo.rnd.enabled:
                 # intrinsic value loss
                 v_loss += value_loss(
-                    new_values,
+                    new_values[INTR],
                     batch[f"values_{INTR}"],
                     batch[f"returns_{INTR}"],
                     cfg.algo.clip_coef,
@@ -327,7 +327,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         # reward dependent on next state
                         target = target_rnd(torch_obs)
                         prediction = predictor_rnd(torch_obs)
-                        r_intr = torch.sum((target - prediction)**2, dim=-1)/cfg.algo.rnd.k 
+                        r_intr = torch.sum((target - prediction)**2, dim=-1, keepdim=True)/cfg.algo.rnd.k 
                         # r = r_extr + beta * r_intr
                         r_intr = cfg.algo.rnd.beta * r_intr
                         rewards[INTR] = r_intr.cpu().numpy()
@@ -403,7 +403,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 local_data[f"rewards_{EXTR}"],
                 local_data[f"values_{EXTR}"],
                 local_data["dones"],
-                next_values,
+                next_values[EXTR],
                 cfg.algo.rollout_steps,
                 cfg.algo.gamma,
                 cfg.algo.gae_lambda,
@@ -415,7 +415,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     local_data[f"rewards_{INTR}"],
                     local_data[f"values_{INTR}"],
                     local_data["dones"],
-                    next_values,
+                    next_values[INTR],
                     cfg.algo.rollout_steps,
                     cfg.algo.rnd.gamma,
                     cfg.algo.rnd.gae_lambda,

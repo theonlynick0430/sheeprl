@@ -55,7 +55,10 @@ def build_networks(
     target = nn.Sequential(feature_extractor, head)
     for param in target.parameters():
         # random init
-        init.xavier_normal_(param)
+        if param.dim() > 1:
+            init.xavier_normal_(param)
+        else:
+            init.zeros_(param)
         # freeze the target network
         param.requires_grad = False
 
@@ -65,11 +68,10 @@ def build_networks(
         if param.dim() > 1:
             init.xavier_normal_(param)
         else:
-            init.zeros_(param) # studies show better to zero init bias
+            init.zeros_(param)
         # unfreeze the predictor network
         param.requires_grad = True
 
-    target = fabric.setup_module(target)
     predictor = fabric.setup_module(predictor)
 
     return target, predictor
