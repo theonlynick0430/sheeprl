@@ -317,9 +317,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     # env runs on the CPU
                     # terminated shape: [N_envs,]
                     # truncated shape: [N_envs,]
-                    obs, rewards, terminated, truncated, info = envs.step(real_actions.reshape(envs.action_space.shape))
+                    obs, r_extr, terminated, truncated, info = envs.step(real_actions.reshape(envs.action_space.shape))
                     # rewards shape: {key: [N_envs,]}
-                    rewards = {EXTR: rewards}
+                    rewards = {EXTR: r_extr}
 
                     # Update the observation
                     for k in obs_keys:
