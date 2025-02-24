@@ -343,7 +343,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     step_data[k] = _obs[np.newaxis]
                     next_obs[k] = _obs
 
-                if cfg.metric.log_level > 0 and "final_info" in info:
+                # Log metrics for episodes that have terminated
+                # note: episodes from different environments may terminate at different times 
+                if cfg.metric.log_level > 0 and "final_info" in info: # if any episode has terminated
                     for i, agent_ep_info in enumerate(info["final_info"]):
                         if agent_ep_info is not None:
                             ep_rew = agent_ep_info["episode"]["r"]
