@@ -17,7 +17,7 @@ from sheeprl.models.models import MLP, MultiEncoder
 from sheeprl.algos.ppo.encoders import CNNEncoder, MLPEncoder
 from sheeprl.utils.fabric import get_single_device_fabric
 from sheeprl.utils.utils import safeatanh, safetanh
-from sheeprl.algos.rnd.rnd import INTR, EXTR
+from sheeprl.algos.ppo.rnd import INTR, EXTR
 
 
 class PPOActor(nn.Module):

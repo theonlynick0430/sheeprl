@@ -9,7 +9,7 @@ defaults:
   - distribution: default.yaml
   - env: default.yaml
   - fabric: default.yaml
-  - metric: default.yaml
+  - metric: rnd.yaml
   - model_manager: default.yaml
   - hydra: default.yaml
   - exp: ???

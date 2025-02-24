@@ -25,8 +25,8 @@ from sheeprl.utils.metric import MetricAggregator
 from sheeprl.utils.registry import register_algorithm
 from sheeprl.utils.timer import timer
 from sheeprl.utils.utils import gae, normalize_tensor, polynomial_decay, save_configs
-import sheeprl.algos.rnd.rnd as rnd
-from sheeprl.algos.rnd.rnd import INTR, EXTR
+import sheeprl.algos.ppo.rnd as rnd
+from sheeprl.algos.ppo.rnd import INTR, EXTR
 
 
 def train(
@@ -286,10 +286,16 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         step_data[k] = obs[k][np.newaxis]
     torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
 
+    if cfg.algo.rnd.enabled and cfg.metric.log_level > 0:
+        r_intr_avg = np.zeros(cfg.env.num_envs)
+        steps = np.zeros(cfg.env.num_envs)
+
     for iter_num in range(start_iter, total_iters + 1):
         # collect interactions with env
         with torch.inference_mode():
             for _ in range(0, cfg.algo.rollout_steps):
+                if cfg.algo.rnd.enabled and cfg.metric.log_level > 0:
+                    steps += 1
                 policy_step += cfg.env.num_envs * world_size
 
                 # Measure environment interaction time: this considers both the model forward
@@ -380,7 +386,13 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 # for online learning
                 rb.add(step_data, validate_args=cfg.buffer.validate_args)
 
-                if cfg.metric.log_level > 0 and "final_info" in info:
+                if cfg.algo.rnd.enabled and cfg.metric.log_level > 0:
+                    # compute average intrinsic reward
+                    r_intr_avg = r_intr_avg * (steps - 1) / steps + rewards[INTR] / steps
+
+                # Log metrics for episodes that have terminated
+                # note: episodes from different environments may terminate at different times 
+                if cfg.metric.log_level > 0 and "final_info" in info: # if any episode has terminated
                     for i, agent_ep_info in enumerate(info["final_info"]):
                         if agent_ep_info is not None:
                             ep_rew = agent_ep_info["episode"]["r"]
@@ -389,7 +401,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                                 aggregator.update("Rewards/rew_avg", ep_rew)
                             if aggregator and "Game/ep_len_avg" in aggregator:
                                 aggregator.update("Game/ep_len_avg", ep_len)
+                            if cfg.algo.rnd.enabled:
+                                if aggregator and "Rewards/intr_avg" in aggregator:
+                                    aggregator.update("Rewards/intr_avg", r_intr_avg[i]) 
                             fabric.print(f"Rank-0: policy_step={policy_step}, reward_env_{i}={ep_rew[-1]}")
+                
+                if cfg.algo.rnd.enabled and cfg.metric.log_level > 0:
+                    # reset metrics for terminated episodes
+                    steps *= (1 - dones[:, 0])
+                    r_intr_avg *= (1 - dones[:, 0])
 
         # Transform the data into PyTorch Tensors
         # local_data shape: [key: [t, ...]]

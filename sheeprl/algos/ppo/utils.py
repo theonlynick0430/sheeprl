@@ -18,7 +18,7 @@ from sheeprl.utils.utils import unwrap_fabric
 if TYPE_CHECKING:
     from mlflow.models.model import ModelInfo
 
-AGGREGATOR_KEYS = {"Rewards/rew_avg", "Game/ep_len_avg", "Loss/value_loss", "Loss/policy_loss", "Loss/entropy_loss"}
+AGGREGATOR_KEYS = {"Rewards/rew_avg", "Rewards/intr_avg", "Game/ep_len_avg", "Loss/value_loss", "Loss/policy_loss", "Loss/entropy_loss"}
 MODELS_TO_REGISTER = {"agent"}
 
 
