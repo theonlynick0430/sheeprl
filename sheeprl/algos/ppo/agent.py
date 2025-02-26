@@ -17,7 +17,6 @@ from sheeprl.models.models import MLP, MultiEncoder
 from sheeprl.algos.ppo.encoders import CNNEncoder, MLPEncoder
 from sheeprl.utils.fabric import get_single_device_fabric
 from sheeprl.utils.utils import safeatanh, safetanh
-from sheeprl.algos.ppo.rnd import INTR, EXTR
 
 
 class PPOActor(nn.Module):
@@ -47,7 +46,6 @@ class PPOAgent(nn.Module):
         encoder_cfg: Dict[str, Any],
         actor_cfg: Dict[str, Any],
         critic_cfg: Dict[str, Any],
-        rnd_cfg: Dict[str, Any],
         cnn_keys: Sequence[str],
         mlp_keys: Sequence[str],
         screen_size: int,
@@ -100,8 +98,8 @@ class PPOAgent(nn.Module):
                     torch.nn.init.orthogonal_(layer.weight, 1.0)
                     layer.bias.data.zero_()
         features_dim = self.feature_extractor.output_dim
-        self.critic = nn.ModuleDict()
-        self.critic[EXTR] = MLP(
+        # Create critic head for extrinsic rewards
+        self.critic_extr = MLP(
             input_dims=features_dim,
             output_dim=1,
             hidden_sizes=[critic_cfg.dense_units] * critic_cfg.mlp_layers,
@@ -113,10 +111,9 @@ class PPOAgent(nn.Module):
                 else None
             ),
         )
-        if rnd_cfg.enabled:
-            # Create critic head for intrinsic rewards
-            # use same architecture as critic for extrinsic rewards
-            self.critic[INTR] = copy.deepcopy(self.critic[EXTR])
+        # Create critic head for intrinsic rewards
+        # use same architecture as critic for extrinsic rewards
+        self.critic_intr = copy.deepcopy(self.critic_extr)
         actor_backbone = (
             MLP(
                 input_dims=features_dim,
@@ -164,16 +161,17 @@ class PPOAgent(nn.Module):
 
     def forward(
         self, obs: Dict[str, Tensor], actions: Optional[List[Tensor]] = None
-    ) -> Tuple[Sequence[Tensor], Tensor, Tensor, Tensor]:
+    ) -> Tuple[Sequence[Tensor], Tensor, Tensor, Tensor, Tensor]:
         feat = self.feature_extractor(obs)
         actor_out: List[Tensor] = self.actor(feat)
-        values = {key: critic(feat) for key, critic in self.critic.items()}
+        values_extr = self.critic_extr(feat)
+        values_intr = self.critic_intr(feat)
         if self.is_continuous:
             if self.distribution == "normal":
                 actions, log_prob, entropy = self._normal(actor_out[0], actions)
             elif self.distribution == "tanh_normal":
                 actions, log_prob, entropy = self._tanh_normal(actor_out[0], actions)
-            return tuple([actions]), log_prob, entropy, values
+            return tuple([actions]), log_prob, entropy, values_extr, values_intr
         else:
             should_append = False
             actions_logprobs: List[Tensor] = []
@@ -192,15 +190,23 @@ class PPOAgent(nn.Module):
                 tuple(actions),
                 torch.stack(actions_logprobs, dim=-1).sum(dim=-1, keepdim=True),
                 torch.stack(actions_entropies, dim=-1).sum(dim=-1, keepdim=True),
-                values,
+                values_extr,
+                values_intr,
             )
 
 
 class PPOPlayer(nn.Module):
-    def __init__(self, feature_extractor: MultiEncoder, actor: PPOActor, critic: nn.ModuleDict) -> None:
+    def __init__(
+        self,
+        feature_extractor: MultiEncoder,
+        actor: PPOActor,
+        critic_extr: nn.Module,
+        critic_intr: nn.Module,
+    ) -> None:
         super().__init__()
         self.feature_extractor = feature_extractor
-        self.critic = critic
+        self.critic_extr = critic_extr
+        self.critic_intr = critic_intr
         self.actor = actor
 
     def _normal(self, actor_out: Tensor) -> Tuple[Tensor, Tensor]:
@@ -225,16 +231,17 @@ class PPOPlayer(nn.Module):
         ).sum(-1, keepdim=False)
         return tanh_actions, log_prob.unsqueeze(dim=-1)
 
-    def forward(self, obs: Dict[str, Tensor]) -> Tuple[Sequence[Tensor], Tensor, Tensor]:
+    def forward(self, obs: Dict[str, Tensor]) -> Tuple[Sequence[Tensor], Tensor, Tensor, Tensor]:
         feat = self.feature_extractor(obs)
-        values = {key: critic(feat) for key, critic in self.critic.items()}
+        values_extr = self.critic_extr(feat)
+        values_intr = self.critic_intr(feat)
         actor_out: List[Tensor] = self.actor(feat)
         if self.actor.is_continuous:
             if self.actor.distribution == "normal":
                 actions, log_prob = self._normal(actor_out[0])
             elif self.actor.distribution == "tanh_normal":
                 actions, log_prob = self._tanh_normal(actor_out[0])
-            return tuple([actions]), log_prob, values
+            return tuple([actions]), log_prob, values_extr, values_intr
         else:
             actions_dist: List[Distribution] = []
             actions_logprobs: List[Tensor] = []
@@ -246,12 +253,15 @@ class PPOPlayer(nn.Module):
             return (
                 tuple(actions),
                 torch.stack(actions_logprobs, dim=-1).sum(dim=-1, keepdim=True),
-                values,
+                values_extr,
+                values_intr,
             )
 
-    def get_values(self, obs: Dict[str, Tensor]) -> Tensor:
+    def get_values(self, obs: Dict[str, Tensor]) -> Tuple[Tensor, Tensor]:
         feat = self.feature_extractor(obs)
-        return {key: critic(feat) for key, critic in self.critic.items()}
+        values_extr = self.critic_extr(feat)
+        values_intr = self.critic_intr(feat)
+        return values_extr, values_intr 
 
     def get_actions(self, obs: Dict[str, Tensor], greedy: bool = False) -> Sequence[Tensor]:
         feat = self.feature_extractor(obs)
@@ -293,7 +303,6 @@ def build_agent(
         encoder_cfg=cfg.algo.encoder,
         actor_cfg=cfg.algo.actor,
         critic_cfg=cfg.algo.critic,
-        rnd_cfg=cfg.algo.rnd,
         cnn_keys=cfg.algo.cnn_keys.encoder,
         mlp_keys=cfg.algo.mlp_keys.encoder,
         screen_size=cfg.env.screen_size,
@@ -304,19 +313,24 @@ def build_agent(
         agent.load_state_dict(agent_state)
 
     # Setup player agent
-    player = PPOPlayer(copy.deepcopy(agent.feature_extractor), copy.deepcopy(agent.actor), copy.deepcopy(agent.critic))
+    player = PPOPlayer(
+        copy.deepcopy(agent.feature_extractor),
+        copy.deepcopy(agent.actor),
+        copy.deepcopy(agent.critic_extr),
+        copy.deepcopy(agent.critic_intr),
+    )
 
     # Setup training agent
     agent.feature_extractor = fabric.setup_module(agent.feature_extractor)
-    for key, critic in agent.critic.items():
-        agent.critic[key] = fabric.setup_module(critic)
+    agent.critic_extr = fabric.setup_module(agent.critic_extr)
+    agent.critic_intr = fabric.setup_module(agent.critic_intr)
     agent.actor = fabric.setup_module(agent.actor)
 
     # Setup player agent
     fabric_player = get_single_device_fabric(fabric)
     player.feature_extractor = fabric_player.setup_module(player.feature_extractor)
-    for key, critic in player.critic.items():
-        player.critic[key] = fabric_player.setup_module(critic)
+    player.critic_extr = fabric_player.setup_module(player.critic_extr)
+    player.critic_intr = fabric_player.setup_module(player.critic_intr)
     player.actor = fabric_player.setup_module(player.actor)
 
     # Tie weights between the agent and the player
@@ -325,6 +339,8 @@ def build_agent(
         player_p.data = agent_p.data
     for agent_p, player_p in zip(agent.actor.parameters(), player.actor.parameters()):
         player_p.data = agent_p.data
-    for agent_p, player_p in zip(agent.critic.parameters(), player.critic.parameters()):
+    for agent_p, player_p in zip(agent.critic_extr.parameters(), player.critic_extr.parameters()):
+        player_p.data = agent_p.data
+    for agent_p, player_p in zip(agent.critic_intr.parameters(), player.critic_intr.parameters()):
         player_p.data = agent_p.data
     return agent, player

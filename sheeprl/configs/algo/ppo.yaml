@@ -52,7 +52,6 @@ critic:
 
 # RND
 rnd: 
-  enabled: True
   # reward weighting
   beta: 1.0 # need to tune
   # for intrinsic critic

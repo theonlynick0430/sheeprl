@@ -19,10 +19,16 @@ aggregator:
   _target_: sheeprl.utils.metric.MetricAggregator
   raise_on_missing: False
   metrics:
-    Rewards/rew_avg: 
+    Rewards/rew_extr_avg: 
       _target_: torchmetrics.MeanMetric
       sync_on_compute: ${metric.sync_on_compute}
-    Rewards/intr_avg: 
+    Rewards/rew_intr_avg: 
+      _target_: torchmetrics.MeanMetric
+      sync_on_compute: ${metric.sync_on_compute}
+    Loss/value_loss_extr: 
+      _target_: torchmetrics.MeanMetric
+      sync_on_compute: ${metric.sync_on_compute}
+    Loss/value_loss_intr: 
       _target_: torchmetrics.MeanMetric
       sync_on_compute: ${metric.sync_on_compute}
     Game/ep_len_avg: 

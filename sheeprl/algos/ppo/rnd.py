@@ -12,9 +12,6 @@ from sheeprl.models.models import MultiEncoder, MLP
 from sheeprl.algos.ppo.encoders import CNNEncoder, MLPEncoder
 
 
-INTR = "intrinsic"
-EXTR = "extrinsic"
-
 def build_networks(
     fabric: Fabric,
     cfg: Dict[str, Any],
