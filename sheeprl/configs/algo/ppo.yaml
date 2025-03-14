@@ -53,7 +53,9 @@ critic:
 # RND
 rnd: 
   # reward weighting
-  beta: 1.0 # need to tune
+  r_coef: 1.0
+  # loss weighting
+  l_coef: 1.0
   # for intrinsic critic
   gamma: 0.999 # from paper
   gae_lambda: 0.95 # variance reduction
