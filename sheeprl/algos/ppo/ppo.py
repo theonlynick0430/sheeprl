@@ -347,7 +347,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     
                 # Correct the next observation for truncated or terminated episodes
                 # see note in env step function for more details
-                dones = np.logical_or(terminated, truncated)
+                dones = np.logical_or(terminated, truncated).astype(np.uint8)
                 obs_next_corrected = copy.deepcopy(obs_next)
                 for i in np.nonzero(dones)[0]:
                     for k, v in info["final_observation"][i].items():
@@ -415,6 +415,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 steps *= (1 - dones[:, 0])
                 r_intr_avg *= (1 - dones[:, 0])
 
+                # transition to next observation
+                obs = obs_next
+
         # Transform the data into PyTorch Tensors
         # local_data shape: [key: [t, ...]]
         local_data = rb.to_tensor(dtype=None, device=device, from_numpy=cfg.buffer.from_numpy)
@@ -445,9 +448,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             )
             local_data["returns_intr"] = returns.float()
             local_data["advantages"] += advantages.float()
-
-        # transition to next observation
-        obs = obs_next
 
         if cfg.buffer.share_data and fabric.world_size > 1:
             # Gather all the tensors from all the world and reshape them
