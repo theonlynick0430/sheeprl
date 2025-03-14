@@ -265,6 +265,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             next_obs[k] = next_obs[k].reshape(cfg.env.num_envs, -1, *next_obs[k].shape[-2:])
         step_data[k] = next_obs[k][np.newaxis]
 
+    # DEBUG 
+    with torch.inference_mode():
+        test_state = torch.zeros(cfg.env.num_envs, 2).to(fabric.device).float()
+        test_actions, _, _, _ = player(test_state)
+        fabric.print(f"test_actions: {test_actions}")
+
     for iter_num in range(start_iter, total_iters + 1):
         # collect interactions with env
         with torch.inference_mode():
@@ -320,6 +326,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     rewards = clip_rewards_fn(rewards).reshape(cfg.env.num_envs, -1).astype(np.float32)
 
                 # Update the step data
+                fabric.print("--------------------------------")
+                fabric.print(f"obs: {next_obs}")
+                fabric.print(f"actions: {actions}")
+                fabric.print(f"logprobs: {logprobs}")
+                fabric.print(f"values: {values}")
+                fabric.print(f"rewards: {rewards}")
+                fabric.print(f"terminated: {terminated}")
+                fabric.print(f"truncated: {truncated}")
+                fabric.print("--------------------------------")
                 step_data["dones"] = dones[np.newaxis]
                 step_data["values"] = values.cpu().numpy()[np.newaxis]
                 step_data["actions"] = actions[np.newaxis]
