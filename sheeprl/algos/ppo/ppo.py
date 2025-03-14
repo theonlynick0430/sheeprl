@@ -267,8 +267,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     # DEBUG 
     with torch.inference_mode():
-        test_state = torch.zeros(cfg.env.num_envs, 2).to(fabric.device).float()
-        test_actions, _, _, _ = player(test_state)
+        test_state = {"state": torch.zeros(cfg.env.num_envs, 2).to(fabric.device).float()}
+        test_actions, _, _ = player(test_state)
         fabric.print(f"test_actions: {test_actions}")
 
     for iter_num in range(start_iter, total_iters + 1):
