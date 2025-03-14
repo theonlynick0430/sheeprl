@@ -54,7 +54,9 @@ critic:
 rnd: 
   # reward weighting
   r_coef: 1.0
-  # loss weighting
+  # value loss weighting
+  vf_coef: ${algo.vf_coef}
+  # target, predictor loss weighting
   l_coef: 1.0
   # for intrinsic critic
   gamma: 0.999 # from paper

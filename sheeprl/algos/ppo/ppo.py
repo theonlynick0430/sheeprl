@@ -109,7 +109,13 @@ def train(
             rnd_loss = torch.sum((target - prediction)**2, dim=-1).mean()/cfg.algo.rnd.k 
 
             # Equation (9) in the paper
-            loss = pg_loss + cfg.algo.vf_coef * (v_loss_extr + v_loss_intr) + cfg.algo.ent_coef * ent_loss + cfg.algo.rnd.l_coef * rnd_loss
+            loss = (
+                pg_loss 
+                + cfg.algo.vf_coef * v_loss_extr 
+                + cfg.algo.rnd.vf_coef * v_loss_intr 
+                + cfg.algo.ent_coef * ent_loss 
+                + cfg.algo.rnd.l_coef * rnd_loss
+            )
 
             optimizer.zero_grad(set_to_none=True)
             fabric.backward(loss)
