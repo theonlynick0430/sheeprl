@@ -39,6 +39,11 @@ def train(
     cfg: Dict[str, Any],
 ):
     """Train the agent on the data collected from the environment."""
+    batch_size = cfg.algo.per_rank_batch_size
+    cnn_keys = cfg.algo.cnn_keys.encoder
+    mlp_keys = cfg.algo.mlp_keys.encoder
+    obs_keys = cnn_keys + mlp_keys
+    
     indexes = list(range(next(iter(data.values())).shape[0]))
     if cfg.buffer.share_data:
         sampler = DistributedSampler(
@@ -50,23 +55,30 @@ def train(
         )
     else:
         sampler = RandomSampler(indexes)
-    sampler = BatchSampler(sampler, batch_size=cfg.algo.per_rank_batch_size, drop_last=False)
+    sampler = BatchSampler(sampler, batch_size=batch_size, drop_last=False)
 
     for epoch in range(cfg.algo.update_epochs):
         if cfg.buffer.share_data:
             sampler.sampler.set_epoch(epoch)
         for batch_idxes in sampler:
             batch = {k: v[batch_idxes] for k, v in data.items()}
-            normalized_obs = normalize_obs(
-                batch, cfg.algo.cnn_keys.encoder, cfg.algo.mlp_keys.encoder + cfg.algo.cnn_keys.encoder
+            torch_obs = {k: batch[k] for k in obs_keys}
+            torch_obs_next = {k.replace("_next", ""): batch[k] for k in batch if k.endswith("_next")}
+            for k in obs_keys:
+                if k in cnn_keys:
+                    torch_obs[k] = torch_obs[k].reshape(batch_size, -1, *torch_obs[k].shape[-2:])
+                    torch_obs_next[k] = torch_obs_next[k].reshape(batch_size, -1, *torch_obs_next[k].shape[-2:])
+                else:
+                    torch_obs[k] = torch_obs[k].reshape(batch_size, -1)
+                    torch_obs_next[k] = torch_obs_next[k].reshape(batch_size, -1)
+            torch_obs = normalize_obs(
+                torch_obs, cnn_keys, obs_keys
             )
-            normalized_obs_next = normalize_obs(
-                {k.replace("_next", ""): batch[k] for k in batch if k.endswith("_next")}, 
-                cfg.algo.cnn_keys.encoder, 
-                cfg.algo.mlp_keys.encoder + cfg.algo.cnn_keys.encoder
+            torch_obs_next = normalize_obs(
+                torch_obs_next, cnn_keys, obs_keys
             )
             _, logprobs, entropy, values_extr, values_intr = agent(
-                normalized_obs, torch.split(batch["actions"], agent.actions_dim, dim=-1)
+                torch_obs, torch.split(batch["actions"], agent.actions_dim, dim=-1)
             )
 
             if cfg.algo.normalize_advantages:
@@ -104,8 +116,8 @@ def train(
             ent_loss = entropy_loss(entropy, cfg.algo.loss_reduction)
 
             # RND loss
-            prediction = predictor_rnd(normalized_obs_next)
-            target = target_rnd(normalized_obs_next)
+            prediction = predictor_rnd(torch_obs_next)
+            target = target_rnd(torch_obs_next)
             rnd_loss = torch.sum((target - prediction)**2, dim=-1).mean()/cfg.algo.rnd.k 
 
             # Equation (9) in the paper
@@ -298,9 +310,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     # Get the first environment observation
     obs = envs.reset(seed=cfg.seed)[0]
-    for k in obs_keys:
-        if k in cfg.algo.cnn_keys.encoder:
-            obs[k] = obs[k].reshape(cfg.env.num_envs, -1, *obs[k].shape[-2:])
 
     # for logging
     r_intr_avg = np.zeros(cfg.env.num_envs)
@@ -338,9 +347,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     obs_next, r_extr, terminated, truncated, info = envs.step(real_actions.reshape(envs.action_space.shape))
 
                 # Formatting
-                for k in obs_keys:
-                    if k in cfg.algo.cnn_keys.encoder:
-                        obs_next[k] = obs_next[k].reshape(cfg.env.num_envs, -1, *obs_next[k].shape[-2:])
                 r_extr = clip_rewards_fn(r_extr).reshape(cfg.env.num_envs, -1).astype(np.float32)
                 terminated = terminated.reshape(cfg.env.num_envs, -1).astype(np.uint8)
                 truncated = truncated.reshape(cfg.env.num_envs, -1).astype(np.uint8)
@@ -351,9 +357,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 obs_next_corrected = copy.deepcopy(obs_next)
                 for i in np.nonzero(dones)[0]:
                     for k, v in info["final_observation"][i].items():
-                        if k in cfg.algo.cnn_keys.encoder:
-                            v = v.reshape(-1, *v.shape[-2:])
-                            v = v / 255.0 - 0.5
                         obs_next_corrected[k][i] = v
                     
                 # Calculate intrinsic reward
