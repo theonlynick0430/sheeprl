@@ -206,6 +206,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             f"The size of the buffer ({cfg.buffer.size}) cannot be lower "
             f"than the rollout steps ({cfg.algo.rollout_steps})"
         )
+    # Rollout buffer is reset every time the agent weights are updated
+    # (i.e buffer_size = rollout_steps)
     rb = ReplayBuffer(
         cfg.buffer.size,
         cfg.env.num_envs,
