@@ -143,6 +143,22 @@ def train(
                 aggregator.update("Loss/entropy_loss", ent_loss.detach())
 
 
+def update_running_stats(stats, new_data, n):
+    """Update running statistics with new data."""
+    if n == 1:
+        stats['mean'] = new_data
+        stats['variance'] = np.zeros_like(new_data)
+        stats['min'] = new_data
+        stats['max'] = new_data
+    else:
+        delta = new_data - stats['mean']
+        stats['mean'] += delta / n
+        stats['variance'] = ((n - 1) * stats['variance'] + delta * (new_data - stats['mean'])) / n
+        stats['min'] = np.minimum(stats['min'], new_data)
+        stats['max'] = np.maximum(stats['max'], new_data)
+    return stats
+
+
 @register_algorithm()
 def main(fabric: Fabric, cfg: Dict[str, Any]):
     if "minedojo" in cfg.env.wrapper._target_.lower():
@@ -173,6 +189,16 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         fabric.logger.log_hyperparams(cfg)
     log_dir = get_log_dir(fabric, cfg.root_dir, cfg.run_name)
     fabric.print(f"Log dir: {log_dir}")
+
+    # Initialize running statistics if enabled
+    norm_stats = None
+    n_samples = 0
+    if cfg.metric.save_norm_stats:
+        norm_stats = {
+            'rewards_intr': {'mean': 0, 'variance': 0, 'min': 0, 'max': 0},
+            'rewards_extr': {'mean': 0, 'variance': 0, 'min': 0, 'max': 0},
+            'states': {k: {'mean': 0, 'variance': 0, 'min': 0, 'max': 0} for k in cfg.algo.mlp_keys.encoder}
+        }
 
     # Environment setup
     vectorized_env = gym.vector.SyncVectorEnv if cfg.env.sync_env else gym.vector.AsyncVectorEnv
@@ -537,6 +563,32 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             ckpt_path = os.path.join(log_dir, f"checkpoint/ckpt_{policy_step}_{fabric.global_rank}.ckpt")
             fabric.call("on_checkpoint_coupled", fabric=fabric, ckpt_path=ckpt_path, state=state)
 
+        # Update running statistics
+        n_samples += 1
+        if fabric.is_global_zero and cfg.metric.save_norm_stats:  # Only update on rank 0 if enabled
+            # Update intrinsic rewards stats
+            norm_stats['rewards_intr'] = update_running_stats(
+                norm_stats['rewards_intr'], 
+                np.mean(r_intr, axis=0),  # Collapse num_env dimension
+                n_samples
+            )
+            
+            # Update extrinsic rewards stats
+            norm_stats['rewards_extr'] = update_running_stats(
+                norm_stats['rewards_extr'], 
+                np.mean(r_extr, axis=0),  # Collapse num_env dimension
+                n_samples
+            )
+            
+            # Update states stats for each MLP key
+            for k in cfg.algo.mlp_keys.encoder:
+                state_data = np.mean(obs[k], axis=0)  # Collapse num_env dimension
+                norm_stats['states'][k] = update_running_stats(
+                    norm_stats['states'][k], 
+                    state_data, 
+                    n_samples
+                )
+
     envs.close()
     if fabric.is_global_zero and cfg.algo.run_test:
         test(player, fabric, cfg, log_dir)
@@ -547,3 +599,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
         models_to_log = {"agent": agent}
         register_model(fabric, log_models, cfg, models_to_log)
+
+    # Save final norm_stats at the end of training if enabled
+    if fabric.is_global_zero and cfg.metric.save_norm_stats:
+        stats_path = os.path.join(log_dir, "norm_stats.npy")
+        np.save(stats_path, norm_stats)
+        fabric.print(f"Saving final norm_stats to: {stats_path}")
+        fabric.print(f"Final norm_stats: {norm_stats}")

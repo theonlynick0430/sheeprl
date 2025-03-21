@@ -4,6 +4,7 @@ defaults:
 
 log_every: 5000
 disable_timer: False
+save_norm_stats: False
 
 # Level of Logging:
 #   0: No log
