@@ -51,21 +51,21 @@ def build_networks(
 
     target = nn.Sequential(feature_extractor, head)
     for param in target.parameters():
-        # random init
+        # random init with larger scale for target
         if param.dim() > 1:
-            init.xavier_normal_(param)
+            init.xavier_normal_(param, gain=2.0)  # larger gain for target
         else:
-            init.zeros_(param)
+            init.uniform_(param, -0.1, 0.1)  # non-zero bias for target
         # freeze the target network
         param.requires_grad = False
 
     predictor = copy.deepcopy(target)
     for param in predictor.parameters():
-        # random init
+        # random init with smaller scale for predictor
         if param.dim() > 1:
-            init.xavier_normal_(param)
+            init.xavier_normal_(param, gain=0.1)  # smaller gain for predictor
         else:
-            init.zeros_(param)
+            init.zeros_(param)  # zero bias for predictor
         # unfreeze the predictor network
         param.requires_grad = True
 
