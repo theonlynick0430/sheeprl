@@ -5,6 +5,8 @@ defaults:
   - /optim@world_model.optimizer: adam
   - /optim@actor.optimizer: adam
   - /optim@critic.optimizer: adam
+  - /optim@rnd.optimizer: adam
+  - /optim@rnd.critic.optimizer: adam
   - _self_
 
 name: dreamer_v3
@@ -162,3 +164,38 @@ critic:
 # Player agent (it interacts with the environment)
 player:
   discrete_size: ${algo.world_model.discrete_size}
+
+# RND
+rnd:
+  # the output dimension of the target, predictor networks
+  output_dim: 16
+
+  # target, predictor network config
+  dense_act: ${algo.dense_act}
+  mlp_layers: ${algo.mlp_layers}
+  layer_norm: ${algo.mlp_layer_norm}
+  dense_units: ${algo.dense_units}
+  clip_gradients: 100.0
+
+  optimizer:
+    lr: 8e-5
+    eps: 1e-5
+    weight_decay: 0
+
+  # intrinsic critic
+  critic:
+    # the coefficient for the reward
+    reward_coef: 1.0
+    gamma: 0.999
+    lmbda: 0.95
+
+    dense_act: ${algo.dense_act}
+    mlp_layers: ${algo.mlp_layers}
+    layer_norm: ${algo.mlp_layer_norm}
+    dense_units: ${algo.dense_units}
+    clip_gradients: 100.0
+
+    optimizer:
+      lr: 8e-5
+      eps: 1e-5
+      weight_decay: 0

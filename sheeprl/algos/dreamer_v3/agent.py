@@ -37,6 +37,7 @@ from sheeprl.models.models import (
 from sheeprl.utils.fabric import get_single_device_fabric
 from sheeprl.utils.model import ModuleType, cnn_forward
 from sheeprl.utils.utils import symlog
+from sheeprl.algos.dreamer_v3.rnd import RND
 
 
 class CNNEncoder(nn.Module):
@@ -942,7 +943,8 @@ def build_agent(
     actor_state: Optional[Dict[str, Tensor]] = None,
     critic_state: Optional[Dict[str, Tensor]] = None,
     target_critic_state: Optional[Dict[str, Tensor]] = None,
-) -> Tuple[WorldModel, _FabricModule, _FabricModule, _FabricModule, PlayerDV3]:
+    rnd_state: Optional[Dict[str, Tensor]] = None,
+) -> Tuple[WorldModel, _FabricModule, _FabricModule, _FabricModule, PlayerDV3, RND]:
     """Build the models and wrap them with Fabric.
 
     Args:
@@ -959,6 +961,8 @@ def build_agent(
             Default to None.
         target_critic_state: (Dict[str, Tensor], optional): the state of the critic.
             Default to None.
+        rnd_state: (Dict[str, Tensor], optional): the state of the RND module.
+            Default to None.
 
     Returns:
         The world model (WorldModel): composed by the encoder, rssm, observation and
@@ -966,10 +970,12 @@ def build_agent(
         The actor (_FabricModule).
         The critic (_FabricModule).
         The target critic (nn.Module).
+        The RND module (RND).
     """
     world_model_cfg = cfg.algo.world_model
     actor_cfg = cfg.algo.actor
     critic_cfg = cfg.algo.critic
+    rnd_cfg = cfg.algo.rnd
 
     # Sizes
     recurrent_state_size = world_model_cfg.recurrent_model.recurrent_state_size
@@ -1167,9 +1173,15 @@ def build_agent(
     actor.apply(init_weights)
     critic.apply(init_weights)
 
+    rnd = RND(
+        rnd_cfg=rnd_cfg,
+        latent_state_size=latent_state_size,
+    ) # module already initializes weights
+
     if cfg.algo.hafner_initialization:
         actor.mlp_heads.apply(uniform_init_weights(1.0))
         critic.model[-1].apply(uniform_init_weights(0.0))
+        rnd.critic.model[-1].apply(uniform_init_weights(0.0))
         rssm.transition_model.model[-1].apply(uniform_init_weights(1.0))
         rssm.representation_model.model[-1].apply(uniform_init_weights(1.0))
         world_model.reward_model.model[-1].apply(uniform_init_weights(0.0))
@@ -1186,6 +1198,8 @@ def build_agent(
         actor.load_state_dict(actor_state)
     if critic_state:
         critic.load_state_dict(critic_state)
+    if rnd_state:
+        rnd.load_state_dict(rnd_state)
 
     # Create the player agent
     fabric_player = get_single_device_fabric(fabric)
@@ -1212,6 +1226,9 @@ def build_agent(
         world_model.continue_model = fabric.setup_module(world_model.continue_model)
     actor = fabric.setup_module(actor)
     critic = fabric.setup_module(critic)
+    rnd.critic = fabric.setup_module(rnd.critic)
+    rnd.predictor = fabric.setup_module(rnd.predictor)
+    rnd.target = fabric.setup_module(rnd.target)
 
     # Setup target critic with a SingleDeviceStrategy
     target_critic = copy.deepcopy(critic.module)
@@ -1233,4 +1250,4 @@ def build_agent(
         p.data = agent_p.data
     for agent_p, p in zip(actor.parameters(), player.actor.parameters()):
         p.data = agent_p.data
-    return world_model, actor, critic, target_critic, player
+    return world_model, actor, critic, target_critic, player, rnd

@@ -39,6 +39,7 @@ from sheeprl.utils.metric import MetricAggregator
 from sheeprl.utils.registry import register_algorithm
 from sheeprl.utils.timer import timer
 from sheeprl.utils.utils import Ratio, save_configs
+from sheeprl.algos.dreamer_v3.rnd import RND
 
 # Decomment the following two lines if you cannot start an experiment with DMC environments
 # os.environ["PYOPENGL_PLATFORM"] = ""
@@ -51,9 +52,12 @@ def train(
     actor: _FabricModule,
     critic: _FabricModule,
     target_critic: torch.nn.Module,
+    rnd: RND,
     world_optimizer: Optimizer,
     actor_optimizer: Optimizer,
     critic_optimizer: Optimizer,
+    critic_intr_optimizer: Optimizer,
+    rnd_optimizer: Optimizer,
     data: Dict[str, Tensor],
     aggregator: MetricAggregator | None,
     cfg: Dict[str, Any],
@@ -69,9 +73,12 @@ def train(
         actor (_FabricModule): the actor model wrapped with Fabric.
         critic (_FabricModule): the critic model wrapped with Fabric.
         target_critic (nn.Module): the target critic model.
+        rnd (RND): the RND module.
         world_optimizer (Optimizer): the world optimizer.
         actor_optimizer (Optimizer): the actor optimizer.
         critic_optimizer (Optimizer): the critic optimizer.
+        critic_intr_optimizer (Optimizer): the intrinsic critic optimizer.
+        rnd_optimizer (Optimizer): the RND module optimizer.
         data (Dict[str, Tensor]): the batch of data to use for training.
         aggregator (MetricAggregator, optional): the aggregator to print the metrics.
         cfg (DictConfig): the configs.
@@ -248,11 +255,22 @@ def train(
     continues = torch.cat((true_continue, continues[1:]))
 
     # Estimate lambda-values
+    # compute r0 + V_lambda(z1), r1 + V_lambda(z1), etc. 
     lambda_values = compute_lambda_values(
         predicted_rewards[1:],
         predicted_values[1:],
         continues[1:] * cfg.algo.gamma,
         lmbda=cfg.algo.lmbda,
+    )
+
+    # RND
+    predicted_values_intr = rnd.critic(imagined_trajectories)
+    predicted_rewards_intr = cfg.algo.rnd.critic.reward_coef * rnd.get_intrinsic_reward(imagined_trajectories)
+    lambda_values_intr = compute_lambda_values(
+        predicted_rewards_intr[1:],
+        predicted_values_intr[1:],
+        continues[1:] * cfg.algo.rnd.critic.gamma,
+        lmbda=cfg.algo.rnd.critic.lmbda,
     )
 
     # Compute the discounts to multiply the lambda values to
@@ -277,7 +295,11 @@ def train(
     normed_lambda_values = (lambda_values - offset) / invscale
     normed_baseline = (baseline - offset) / invscale
     advantage = normed_lambda_values - normed_baseline
+    advantage_intr = lambda_values_intr - predicted_values_intr[:-1]
+    advantage += advantage_intr # curiosity bonus
     if is_continuous:
+        # omit pi(a|s) term since we backprop through sampling procedure
+        # via reparameterization trick
         objective = advantage
     else:
         objective = (
@@ -326,6 +348,32 @@ def train(
         )
     critic_optimizer.step()
 
+    # RND optimization
+    critic_intr_optimizer.zero_grad(set_to_none=True)
+    value_intr_loss = 0.5 * ((lambda_values_intr.detach() - 
+                             rnd.critic(imagined_trajectories.detach()[:-1])) ** 2).mean()
+    fabric.backward(value_intr_loss)
+    if cfg.algo.rnd.critic.clip_gradients is not None and cfg.algo.rnd.critic.clip_gradients > 0:
+        fabric.clip_gradients(
+            module=rnd.critic,
+            optimizer=critic_intr_optimizer,
+            max_norm=cfg.algo.rnd.critic.clip_gradients,
+            error_if_nonfinite=False,
+        )
+    critic_intr_optimizer.step()
+
+    rnd_optimizer.zero_grad(set_to_none=True)
+    rnd_loss = 0.5 * rnd.get_intrinsic_reward(imagined_trajectories.detach()[:-1]).mean()
+    fabric.backward(rnd_loss)
+    if cfg.algo.rnd.clip_gradients is not None and cfg.algo.rnd.clip_gradients > 0:
+        fabric.clip_gradients(
+            module=rnd.predictor,
+            optimizer=rnd_optimizer,
+            max_norm=cfg.algo.rnd.clip_gradients,
+            error_if_nonfinite=False,
+        )
+    rnd_optimizer.step()
+
     # Log metrics
     if aggregator and not aggregator.disabled:
         aggregator.update("Loss/world_model_loss", rec_loss.detach())
@@ -354,6 +402,8 @@ def train(
     # Reset everything
     actor_optimizer.zero_grad(set_to_none=True)
     critic_optimizer.zero_grad(set_to_none=True)
+    critic_intr_optimizer.zero_grad(set_to_none=True)
+    rnd_optimizer.zero_grad(set_to_none=True)
     world_optimizer.zero_grad(set_to_none=True)
 
 
@@ -432,7 +482,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         fabric.print("Decoder MLP keys:", cfg.algo.mlp_keys.decoder)
     obs_keys = cfg.algo.cnn_keys.encoder + cfg.algo.mlp_keys.encoder
 
-    world_model, actor, critic, target_critic, player = build_agent(
+    world_model, actor, critic, target_critic, player, rnd = build_agent(
         fabric,
         actions_dim,
         is_continuous,
@@ -442,6 +492,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         state["actor"] if cfg.checkpoint.resume_from else None,
         state["critic"] if cfg.checkpoint.resume_from else None,
         state["target_critic"] if cfg.checkpoint.resume_from else None,
+        state["rnd"] if cfg.checkpoint.resume_from else None,
     )
 
     # Optimizers
@@ -450,12 +501,18 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     )
     actor_optimizer = hydra.utils.instantiate(cfg.algo.actor.optimizer, params=actor.parameters(), _convert_="all")
     critic_optimizer = hydra.utils.instantiate(cfg.algo.critic.optimizer, params=critic.parameters(), _convert_="all")
+    critic_intr_optimizer = hydra.utils.instantiate(
+        cfg.algo.rnd.critic.optimizer, params=rnd.critic.parameters(), _convert_="all"
+    )
+    rnd_optimizer = hydra.utils.instantiate(cfg.algo.rnd.optimizer, params=rnd.predictor.parameters(), _convert_="all")
     if cfg.checkpoint.resume_from:
         world_optimizer.load_state_dict(state["world_optimizer"])
         actor_optimizer.load_state_dict(state["actor_optimizer"])
         critic_optimizer.load_state_dict(state["critic_optimizer"])
-    world_optimizer, actor_optimizer, critic_optimizer = fabric.setup_optimizers(
-        world_optimizer, actor_optimizer, critic_optimizer
+        critic_intr_optimizer.load_state_dict(state["critic_intr_optimizer"])
+        rnd_optimizer.load_state_dict(state["rnd_optimizer"])
+    world_optimizer, actor_optimizer, critic_optimizer, critic_intr_optimizer, rnd_optimizer = fabric.setup_optimizers(
+        world_optimizer, actor_optimizer, critic_optimizer, critic_intr_optimizer, rnd_optimizer
     )
     moments = Moments(
         cfg.algo.actor.moments.decay,
@@ -685,9 +742,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             actor,
                             critic,
                             target_critic,
+                            rnd,
                             world_optimizer,
                             actor_optimizer,
                             critic_optimizer,
+                            critic_intr_optimizer,
+                            rnd_optimizer,
                             batch,
                             aggregator,
                             cfg,
@@ -743,9 +803,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 "actor": actor.state_dict(),
                 "critic": critic.state_dict(),
                 "target_critic": target_critic.state_dict(),
+                "rnd": rnd.state_dict(),
                 "world_optimizer": world_optimizer.state_dict(),
                 "actor_optimizer": actor_optimizer.state_dict(),
                 "critic_optimizer": critic_optimizer.state_dict(),
+                "critic_intr_optimizer": critic_intr_optimizer.state_dict(),
+                "rnd_optimizer": rnd_optimizer.state_dict(),
                 "moments": moments.state_dict(),
                 "ratio": ratio.state_dict(),
                 "iter_num": iter_num * fabric.world_size,
