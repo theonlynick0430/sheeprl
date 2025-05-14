@@ -27,12 +27,18 @@ AGGREGATOR_KEYS = {
     "Loss/reward_loss",
     "Loss/state_loss",
     "Loss/continue_loss",
+    "Loss/value_intr_loss",
+    "Loss/rnd_loss",
+    "Loss/rnd_init_state_loss",
     "State/kl",
     "State/post_entropy",
     "State/prior_entropy",
+    "State/value_intr_init_state",
     "Grads/world_model",
     "Grads/actor",
     "Grads/critic",
+    "Grads/critic_intr",
+    "Grads/rnd",
 }
 MODELS_TO_REGISTER = {"world_model", "actor", "critic", "target_critic", "moments"}
 

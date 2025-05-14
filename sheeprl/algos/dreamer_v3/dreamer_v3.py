@@ -353,8 +353,9 @@ def train(
     value_intr_loss = 0.5 * ((lambda_values_intr.detach() - 
                              rnd.critic(imagined_trajectories.detach()[:-1])) ** 2).mean()
     fabric.backward(value_intr_loss)
+    critic_intr_grads = None
     if cfg.algo.rnd.critic.clip_gradients is not None and cfg.algo.rnd.critic.clip_gradients > 0:
-        fabric.clip_gradients(
+        critic_intr_grads = fabric.clip_gradients(
             module=rnd.critic,
             optimizer=critic_intr_optimizer,
             max_norm=cfg.algo.rnd.critic.clip_gradients,
@@ -365,8 +366,9 @@ def train(
     rnd_optimizer.zero_grad(set_to_none=True)
     rnd_loss = 0.5 * rnd.get_intrinsic_reward(imagined_trajectories.detach()[:-1]).mean()
     fabric.backward(rnd_loss)
+    rnd_grads = None
     if cfg.algo.rnd.clip_gradients is not None and cfg.algo.rnd.clip_gradients > 0:
-        fabric.clip_gradients(
+        rnd_grads = fabric.clip_gradients(
             module=rnd.predictor,
             optimizer=rnd_optimizer,
             max_norm=cfg.algo.rnd.clip_gradients,
@@ -381,6 +383,8 @@ def train(
         aggregator.update("Loss/reward_loss", reward_loss.detach())
         aggregator.update("Loss/state_loss", state_loss.detach())
         aggregator.update("Loss/continue_loss", continue_loss.detach())
+        aggregator.update("Loss/value_intr_loss", value_intr_loss.detach())
+        aggregator.update("Loss/rnd_loss", rnd_loss.detach())
         aggregator.update("State/kl", kl.mean().detach())
         aggregator.update(
             "State/post_entropy",
@@ -398,6 +402,10 @@ def train(
             aggregator.update("Grads/actor", actor_grads.mean().detach())
         if critic_grads:
             aggregator.update("Grads/critic", critic_grads.mean().detach())
+        if critic_intr_grads:
+            aggregator.update("Grads/critic_intr", critic_intr_grads.mean().detach())
+        if rnd_grads:
+            aggregator.update("Grads/rnd", rnd_grads.mean().detach())
 
     # Reset everything
     actor_optimizer.zero_grad(set_to_none=True)
@@ -608,6 +616,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         policy_step += policy_steps_per_iter
 
         with torch.inference_mode():
+            print("---Environment interaction---")
             # Measure environment interaction time: this considers both the model forward
             # to get the action given the observation and the time taken into the environment
             with timer("Time/env_interaction_time", SumMetric, sync_on_compute=False):
@@ -718,6 +727,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             ratio_steps = policy_step - prefill_steps * policy_steps_per_iter
             per_rank_gradient_steps = ratio(ratio_steps / world_size)
             if per_rank_gradient_steps > 0:
+                print("---Sampling data---")
                 local_data = rb.sample_tensors(
                     cfg.algo.per_rank_batch_size,
                     sequence_length=cfg.algo.per_rank_sequence_length,
@@ -736,6 +746,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             for cp, tcp in zip(critic.module.parameters(), target_critic.parameters()):
                                 tcp.data.copy_(tau * cp.data + (1 - tau) * tcp.data)
                         batch = {k: v[i].float() for k, v in local_data.items()}
+                        print("---Training agent---")
                         train(
                             fabric,
                             world_model,
@@ -762,6 +773,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         if cfg.metric.log_level > 0 and (policy_step - last_log >= cfg.metric.log_every or iter_num == total_iters):
             # Sync distributed metrics
             if aggregator and not aggregator.disabled:
+                print("---Logging metrics---")
                 metrics_dict = aggregator.compute()
                 fabric.log_dict(metrics_dict, policy_step)
                 aggregator.reset()
