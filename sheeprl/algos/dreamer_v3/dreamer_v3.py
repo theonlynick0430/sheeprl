@@ -64,7 +64,7 @@ def train(
     is_continuous: bool,
     actions_dim: Sequence[int],
     moments: Moments,
-) -> None:
+) -> torch.Tensor:
     """Runs one-step update of the agent.
 
     Args:
@@ -85,6 +85,9 @@ def train(
         is_continuous (bool): whether or not the environment is continuous.
         actions_dim (Sequence[int]): the actions dimension.
         moments (Moments): the moments for normalizing the lambda values.
+
+    Returns:
+        latent_state_init: the initial latent state of the agent during training.
     """
     # The environment interaction goes like this:
     # Actions:           a0       a1       a2      a4
@@ -210,9 +213,10 @@ def train(
     imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)
     recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
     imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+    # for each real step in each batch, we imagine the next H steps
     imagined_trajectories = torch.empty(
-        cfg.algo.horizon + 1,
-        batch_size * sequence_length,
+        cfg.algo.horizon + 1,                       # imagined steps
+        batch_size * sequence_length,               # batch size * real steps
         stoch_state_size + recurrent_state_size,
         device=device,
     )
@@ -414,6 +418,12 @@ def train(
     rnd_optimizer.zero_grad(set_to_none=True)
     world_optimizer.zero_grad(set_to_none=True)
 
+    return imagined_trajectories.view(
+        cfg.algo.horizon + 1, 
+        batch_size, 
+        sequence_length, -1
+    )[0, :, 0, :].detach()
+
 
 @register_algorithm()
 def main(fabric: Fabric, cfg: Dict[str, Any]):
@@ -612,6 +622,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     player.init_states()
 
     cumulative_per_rank_gradient_steps = 0
+    latent_state_init = None
     for iter_num in range(start_iter, total_iters + 1):
         policy_step += policy_steps_per_iter
 
@@ -747,7 +758,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                                 tcp.data.copy_(tau * cp.data + (1 - tau) * tcp.data)
                         batch = {k: v[i].float() for k, v in local_data.items()}
                         print("---Training agent---")
-                        train(
+                        _latent_state_init = train(
                             fabric,
                             world_model,
                             actor,
@@ -766,10 +777,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             actions_dim,
                             moments,
                         )
+                        if latent_state_init is None:
+                            latent_state_init = _latent_state_init
                         cumulative_per_rank_gradient_steps += 1
                     train_step += world_size
 
         # Log metrics
+        if latent_state_init is not None:
+            aggregator.update("Loss/rnd_init_state_loss", 0.5 * rnd.get_intrinsic_reward(latent_state_init).mean().detach())
+            aggregator.update("State/value_intr_init_state", rnd.critic(latent_state_init).mean().detach())
         if cfg.metric.log_level > 0 and (policy_step - last_log >= cfg.metric.log_every or iter_num == total_iters):
             # Sync distributed metrics
             if aggregator and not aggregator.disabled:
